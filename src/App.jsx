@@ -67,20 +67,20 @@ const QNames=["Q1 Abr–Jun","Q2 Jul–Sep","Q3 Oct–Dic","Q4 Ene–Mar"];
 // ║           COLUMN DETECTION                           ║
 // ╚══════════════════════════════════════════════════════╝
 const CA={
-  ing: ["ingreso tot","ingresos","neto","ventas","znetwr"],
-  cst: ["costo tot","costo","costos","cost of"],
-  cli: ["cliente"],
-  clinm:["descripción cliente","descripcion cliente"],
-  f2:  ["jerarquia de producto 2"],
-  f1:  ["jerarquia de producto","familia"],
-  art: ["articulo","matnr","código","codigo"],
-  suc: ["sucursal","descrip.sucursal","centro"],
-  sec: ["descrip. gr.clie.","sector","descrip. gr"],
-  rep: ["representante de ventas","ejecutivo","vendedor"],
-  vol: ["vol.ventas","vol ventas","volumen"],
-  abc: ["indicador abc"],
-  fecha:["fecha factura","fecha de contabilización","fecha"],
-  per: ["período/año","periodo/año","periodo"],
+  ing: ["ingreso tot","ingreso","ingresos","neto","ventas netas","venta neta","ventas","znetwr","importe neto","importe","valor neto","net value","netval"],
+  cst: ["costo tot","costo total","costo","costos","cost of","coste","valor costo","costo merc"],
+  cli: ["cliente","kunnr","cod. cliente","cod cliente","código cliente","codigo cliente"],
+  clinm:["descripción cliente","descripcion cliente","nombre cliente","razon social","razón social","nombre"],
+  f2:  ["jerarquia de producto 2","jerarquía de producto 2","jer. producto 2","familia 2","subfamilia"],
+  f1:  ["jerarquia de producto","jerarquía de producto","jer. producto","familia","linea","línea"],
+  art: ["articulo","artículo","matnr","código","codigo","código artículo","cod. art","material","part number"],
+  suc: ["sucursal","descrip.sucursal","centro","werks","centro suministrador"],
+  sec: ["descrip. gr.clie.","descrip.gr.clie.","descripcion grupo cliente","grupo de clientes","grupo clientes","sector","industria","segmento","descrip. gr"],
+  rep: ["representante de ventas","representante ventas","ejecutivo","ejecutivo de ventas","vendedor","asesor","asesor comercial"],
+  vol: ["vol.ventas","vol ventas","volumen","cantidad","unidades","qty","volume"],
+  abc: ["indicador abc","ind. abc","ind.abc","abc"],
+  fecha:["fecha factura","fecha de factura","fecha contab","fecha de contabilización","fecha contabilización","fecha","date","fec. factura"],
+  per: ["período/año","periodo/año","período año","periodo año","periodo","period","mes"],
 };
 function dc(headers,f){const lo=headers.map(h=>String(h??"").toLowerCase().trim());const al=CA[f]||[];const i=lo.findIndex(h=>al.some(a=>h.includes(a)));return i!==-1?headers[i]:null;}
 function sucFromName(n){const u=n.toUpperCase();if(u.includes("K27")||u.includes("AREQUIPA"))return"K27";if(u.includes("K11")||u.includes("HUANCAYO"))return"K11";if(u.includes("K23")||u.includes("TACNA"))return"K23";if(u.includes("K01")||u.includes("LIMA")||u.includes("CALLAO"))return"K01";return"K??"}
@@ -96,14 +96,37 @@ async function parseXLSX(file){
   const c={};for(const f of Object.keys(CA))c[f]=dc(headers,f);
   const label=file.name.replace(/\.[^.]+$/,"");
   const pfn=periodFromName(label), sfn=sucFromName(label);
-  const recs=rows.map(r=>{
-    const ing=parseFloat(r[c.ing])||0,cst=parseFloat(r[c.cst])||0;
-    let mo=pfn?.mo??4,yr=pfn?.y??2026;
+
+  // Also detect "Fecha de contabilización" as date fallback
+  const cFechaContab = headers.find(h=>h.toLowerCase().includes("contabiliz"));
+
+  const recs=[];
+  rows.forEach(r=>{
+    const ing=parseFloat(r[c.ing])||0;
+    const cst=parseFloat(r[c.cst])||0;
+    // Skip pure rebate/zero rows that have no client and no ingreso
+    if(ing===0 && cst===0 && !r[c.cli]) return;
+
+    // Period detection — priority: Período/Año column (format 2026004) → fecha factura → fecha contab → filename
+    let mo=pfn?.mo??4, yr=pfn?.y??2026;
+
+    // 1. Try Período/Año (value like 2026004 = year 2026 month 04)
+    if(r[c.per]){
+      const s=String(Math.round(parseFloat(r[c.per]))||0).replace(/\D/g,"");
+      if(s.length>=5){yr=parseInt(s.slice(0,4));mo=parseInt(s.slice(4))||mo;}
+    }
+    // 2. Try Fecha factura
     const fv=r[c.fecha];
-    if(fv){const d=fv instanceof Date?fv:new Date(fv);if(!isNaN(d)){mo=d.getMonth()+1;yr=d.getFullYear();}}
-    if(!pfn&&r[c.per]){const p=String(r[c.per]),m=p.match(/(\d{4})(\d{2})/);if(m){yr=parseInt(m[1]);mo=parseInt(m[2]);}}
+    if(fv){const d=fv instanceof Date?fv:new Date(fv);if(!isNaN(d)&&d.getFullYear()>2000){mo=d.getMonth()+1;yr=d.getFullYear();}}
+    // 3. Fallback to Fecha de contabilización
+    else if(cFechaContab&&r[cFechaContab]){
+      const fc=r[cFechaContab];
+      const d=fc instanceof Date?fc:new Date(fc);
+      if(!isNaN(d)&&d.getFullYear()>2000){mo=d.getMonth()+1;yr=d.getFullYear();}
+    }
+
     const fy=getFY(mo,yr),fmi=getFMI(mo),fq=getFQ(mo);
-    return{ing,cst,mgn:ing-cst,vol:parseFloat(r[c.vol])||0,
+    recs.push({ing,cst,mgn:ing-cst,vol:parseFloat(r[c.vol])||0,
       cli:r[c.cli]?String(r[c.cli]).trim():"0",
       clinm:r[c.clinm]?String(r[c.clinm]).trim():"Sin nombre",
       f2:r[c.f2]?String(r[c.f2]).trim():"Sin familia",
@@ -113,9 +136,9 @@ async function parseXLSX(file){
       sec:r[c.sec]?String(r[c.sec]).trim():"Otros",
       rep:r[c.rep]?String(r[c.rep]).trim():"0",
       abc:r[c.abc]?String(r[c.abc]).trim():"N/A",
-      mo,yr,fy,fmi,fq,fml:FM[fmi],fyl:fyLbl(fy),file:label};
+      mo,yr,fy,fmi,fq,fml:FM[fmi],fyl:fyLbl(fy),file:label});
   });
-  return{label,suc:sfn,recs};
+  return{label,suc:sfn,recs,cols:c,headers:headers.slice(0,20)};
 }
 
 // ╔══════════════════════════════════════════════════════╗
@@ -238,7 +261,7 @@ export default function App(){
       const p=await parseXLSX(f);
       if(!p)continue;
       newRecs.push(...p.recs);
-      newFiles.push({label:p.label,count:p.recs.length,suc:p.suc});
+      newFiles.push({label:p.label,count:p.recs.length,suc:p.suc,cols:p.cols,headers:p.headers});
     }
     if(!newRecs.length){setLoading(false);return;}
     setAllRecs(prev=>{
@@ -1269,8 +1292,36 @@ export default function App(){
         </div>
       </Pnl>
 
-      {/* Files loaded */}
-      <Pnl>
+      {/* Column diagnostics */}
+      {files.filter(f=>f.cols).length>0&&(
+        <Pnl>
+          <ST sub="Columnas detectadas en cada archivo — si 'Ingresos' dice null, el nombre de columna no coincide">🔍 Diagnóstico de columnas detectadas</ST>
+          <div style={{display:"flex",flexDirection:"column",gap:12}}>
+            {files.filter(f=>f.cols).slice(0,5).map((f,i)=>(
+              <div key={i} style={{background:B.panel,borderRadius:8,padding:"12px 14px",border:`1px solid ${B.border}`}}>
+                <div style={{fontWeight:700,color:B.white,fontSize:11,marginBottom:8}}>{f.label}</div>
+                <div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>
+                  {Object.entries(f.cols||{}).map(([field,col])=>(
+                    <span key={field} style={{fontSize:10,padding:"2px 8px",borderRadius:4,
+                      background:col?B.greenDim:B.redDim,
+                      border:`1px solid ${col?B.green:B.red}`,
+                      color:col?B.greenLt:B.red}}>
+                      {field}: {col?`"${col}"`:"❌ NO DETECTADO"}
+                    </span>
+                  ))}
+                </div>
+                <div style={{fontSize:9,color:B.gray3}}>
+                  Primeras columnas del archivo: {(f.headers||[]).join(" · ")}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{marginTop:12,padding:"10px 14px",background:B.amberDim,border:`1px solid ${B.amber}`,borderRadius:6,fontSize:11,color:B.amberLt,lineHeight:1.6}}>
+            ⚠️ Si <strong>ing</strong> aparece como ❌ NO DETECTADO, el campo de ingresos no se encontró.<br/>
+            Mira las columnas del archivo y escribe el nombre exacto al equipo para actualizar el detector.
+          </div>
+        </Pnl>
+      )}
         <ST sub="Archivos actualmente cargados en esta sesión">Datos en memoria</ST>
         {files.length===0?<div style={{color:B.gray3,fontSize:11}}>Ningún archivo cargado</div>:(
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
