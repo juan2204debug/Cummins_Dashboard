@@ -1,4 +1,3 @@
-
 import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import * as XLSX from "xlsx";
 import { AreaChart, Area, BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, ScatterChart, Scatter, ZAxis, ComposedChart, RadarChart, Radar, PolarGrid, PolarAngleAxis } from "recharts";
@@ -96,11 +95,30 @@ async function parseXLSX(file){
   const headers=Object.keys(rows[0]);
   const c={};for(const f of Object.keys(CA))c[f]=dc(headers,f);
 
-  // Force "Ingreso TOT" over "Ingresos" — always prefer the aggregated column
-  const ingTOT = headers.find(h=>h.trim()==="Ingreso TOT"||h.trim()==="INGRESO TOT");
-  if(ingTOT) c.ing = ingTOT;
-  const cstTOT = headers.find(h=>h.trim()==="Costo TOT"||h.trim()==="COSTO TOT");
-  if(cstTOT) c.cst = cstTOT;
+  // ── Hard-coded priority overrides — always use the correct column ──────────
+  // Ingreso TOT = the real net income aggregated field
+  const _ingTOT = headers.find(h=>/^ingreso\s*tot$/i.test(h.trim()));
+  if(_ingTOT) c.ing = _ingTOT;
+  // Costo TOT = the real cost aggregated field
+  const _cstTOT = headers.find(h=>/^costo\s*tot$/i.test(h.trim()));
+  if(_cstTOT) c.cst = _cstTOT;
+  // Sector = always use descriptive name, not code
+  const _sec = headers.find(h=>/descrip.*gr.*clie/i.test(h));
+  if(_sec) c.sec = _sec;
+  // Rep = always use "Representante de ventas", not "Grupo de vendedores"
+  const _rep = headers.find(h=>/representante.*ventas/i.test(h));
+  if(_rep) c.rep = _rep;
+  // Cliente name
+  const _clinm = headers.find(h=>/descripci[oó]n\s*cliente/i.test(h));
+  if(_clinm) c.clinm = _clinm;
+
+  // ── Sanity check: if detected column has impossible sum (>1B = SAP ID), reject it ──
+  const sampleSum=(colName)=>{
+    if(!colName||!rows.length)return 0;
+    return rows.slice(0,50).reduce((s,r)=>s+Math.abs(pNum(r[colName])),0);
+  };
+  if(c.ing && sampleSum(c.ing)===0 && sampleSum("Ingresos")>0) c.ing="Ingresos";
+
   const label=file.name.replace(/\.[^.]+$/,"");
   const pfn=periodFromName(label), sfn=sucFromName(label);
 
@@ -140,7 +158,7 @@ async function parseXLSX(file){
       f1:r[c.f1]?String(r[c.f1]).trim():"Sin familia",
       art:r[c.art]?String(r[c.art]).trim():"?",
       suc:r[c.suc]?String(r[c.suc]).trim():sfn,
-      sec:r[c.sec]?String(r[c.sec]).trim():"Otros",
+      sec:(()=>{const v=r[c.sec]?String(r[c.sec]).trim():"";return(v&&isNaN(v)&&v.length>1)?v:"Otros";})(),
       rep:r[c.rep]?String(r[c.rep]).trim():"0",
       abc:r[c.abc]?String(r[c.abc]).trim():"N/A",
       mo,yr,fy,fmi,fq,fml:FM[fmi],fyl:fyLbl(fy),file:label});
