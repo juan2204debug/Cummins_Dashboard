@@ -1,3 +1,4 @@
+ (cd "$(git rev-parse --show-toplevel)" && git apply --3way <<'EOF' 
 diff --git a/src/App.jsx b/src/App.jsx
 index 6ea3f3c17af2ce7cce0c9f24c44ecaebe68028d4..4ddf39f08df022e7fce100a264253f2a66ebe1e1 100644
 --- a/src/App.jsx
@@ -314,3 +315,6 @@ index 6ea3f3c17af2ce7cce0c9f24c44ecaebe68028d4..4ddf39f08df022e7fce100a264253f2a
                    <td style={{padding:"7px 10px",color:B.white,fontWeight:600}}>{f.label}</td>
                    <td style={{padding:"7px 10px"}}><span style={{background:B.redBg,color:B.red,borderRadius:3,padding:"2px 7px",fontSize:10,fontWeight:700}}>{f.suc}</span></td>
                    <td style={{padding:"7px 10px",color:B.gray3}}>{fN(f.count)} líneas</td>
+ 
+EOF
+)
