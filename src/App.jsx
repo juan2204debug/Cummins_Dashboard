@@ -1322,6 +1322,9 @@ export default function App(){
           </div>
         </Pnl>
       )}
+
+      {/* Files loaded */}
+      <Pnl>
         <ST sub="Archivos actualmente cargados en esta sesión">Datos en memoria</ST>
         {files.length===0?<div style={{color:B.gray3,fontSize:11}}>Ningún archivo cargado</div>:(
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
