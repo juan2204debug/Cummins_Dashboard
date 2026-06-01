@@ -67,21 +67,29 @@ const QNames=["Q1 Abr–Jun","Q2 Jul–Sep","Q3 Oct–Dic","Q4 Ene–Mar"];
 // ║           COLUMN DETECTION                           ║
 // ╚══════════════════════════════════════════════════════╝
 const CA={
-  ing: ["ingreso tot","ingreso","ingresos","neto","ventas netas","venta neta","ventas","znetwr","importe neto","importe","valor neto","net value","netval"],
-  cst: ["costo tot","costo total","costo","costos","cost of","coste","valor costo","costo merc"],
-  cli: ["cliente","kunnr","cod. cliente","cod cliente","código cliente","codigo cliente"],
-  clinm:["descripción cliente","descripcion cliente","nombre cliente","razon social","razón social","nombre"],
-  f2:  ["jerarquia de producto 2","jerarquía de producto 2","jer. producto 2","familia 2","subfamilia"],
-  f1:  ["jerarquia de producto","jerarquía de producto","jer. producto","familia","linea","línea"],
-  art: ["articulo","artículo","matnr","código","codigo","código artículo","cod. art","material","part number"],
-  suc: ["sucursal","descrip.sucursal","centro","werks","centro suministrador"],
-  sec: ["descrip. gr.clie.","descrip.gr.clie.","descripcion grupo cliente","grupo de clientes","grupo clientes","sector","industria","segmento","descrip. gr"],
-  rep: ["representante de ventas","representante ventas","ejecutivo","ejecutivo de ventas","vendedor","asesor","asesor comercial"],
-  vol: ["vol.ventas","vol ventas","volumen","cantidad","unidades","qty","volume"],
-  abc: ["indicador abc","ind. abc","ind.abc","abc"],
-  fecha:["fecha factura","fecha de factura","fecha contab","fecha de contabilización","fecha contabilización","fecha","date","fec. factura"],
-  per: ["período/año","periodo/año","período año","periodo año","periodo","period","mes"],
+  ing: ["ingreso tot","ingresos"],
+  cst: ["costo tot","costos material"],
+  cli: ["cliente"],
+  clinm:["descripción cliente","descripcion cliente"],
+  f2:  ["jerarquia de producto 2","jerarquía de producto 2"],
+  f1:  ["jerarquia de producto","jerarquía de producto"],
+  art: ["articulo","artículo"],
+  suc: ["sucursal"],
+  sec: ["descrip. gr.clie.","descrip.gr.clie."],
+  rep: ["representante de ventas"],
+  vol: ["vol.ventas","vol ventas"],
+  abc: ["indicador abc"],
+  fecha:["fecha factura"],
+  per: ["período/año","periodo/año"],
 };
+// Exact match override — always wins over dc() fuzzy search
+function dcExact(headers,patterns){
+  for(const p of patterns){
+    const found=headers.find(h=>h.trim().toLowerCase()===p.toLowerCase());
+    if(found)return found;
+  }
+  return null;
+}
 function dc(headers,f){const lo=headers.map(h=>String(h??"").toLowerCase().trim());const al=CA[f]||[];const i=lo.findIndex(h=>al.some(a=>h.includes(a)));return i!==-1?headers[i]:null;}
 function sucFromName(n){const u=n.toUpperCase();if(u.includes("K27")||u.includes("AREQUIPA"))return"K27";if(u.includes("K11")||u.includes("HUANCAYO"))return"K11";if(u.includes("K23")||u.includes("TACNA"))return"K23";if(u.includes("K01")||u.includes("LIMA")||u.includes("CALLAO"))return"K01";return"K??"}
 function periodFromName(n){const u=n.toUpperCase().replace(/[_\-\.]/g," ");const m=u.match(/(\d{4})\s+(\d{1,2})/);if(m)return{y:parseInt(m[1]),mo:parseInt(m[2])};const mi=SM.findIndex(s=>u.includes(s));if(mi!==-1){const ym=u.match(/(\d{4})/);if(ym)return{y:parseInt(ym[1]),mo:mi+1}}return null}
@@ -95,35 +103,20 @@ async function parseXLSX(file){
   const headers=Object.keys(rows[0]);
   const c={};for(const f of Object.keys(CA))c[f]=dc(headers,f);
 
-  // ── Hard-coded priority overrides — always use the correct column ──────────
-  // Ingreso TOT = the real net income aggregated field
-  const _ingTOT = headers.find(h=>/^ingreso\s*tot$/i.test(h.trim()));
-  if(_ingTOT) c.ing = _ingTOT;
-  // Costo TOT = the real cost aggregated field
-  const _cstTOT = headers.find(h=>/^costo\s*tot$/i.test(h.trim()));
-  if(_cstTOT) c.cst = _cstTOT;
-  // Sector = always use descriptive name, not code
-  const _sec = headers.find(h=>/descrip.*gr.*clie/i.test(h));
-  if(_sec) c.sec = _sec;
-  // Rep = always use "Representante de ventas", not "Grupo de vendedores"
-  const _rep = headers.find(h=>/representante.*ventas/i.test(h));
-  if(_rep) c.rep = _rep;
-  // Cliente name
-  const _clinm = headers.find(h=>/descripci[oó]n\s*cliente/i.test(h));
-  if(_clinm) c.clinm = _clinm;
-
-  // ── Sanity check: if detected column has impossible sum (>1B = SAP ID), reject it ──
-  const sampleSum=(colName)=>{
-    if(!colName||!rows.length)return 0;
-    return rows.slice(0,50).reduce((s,r)=>s+Math.abs(pNum(r[colName])),0);
-  };
-  if(c.ing && sampleSum(c.ing)===0 && sampleSum("Ingresos")>0) c.ing="Ingresos";
-
-  const label=file.name.replace(/\.[^.]+$/,"");
-  const pfn=periodFromName(label), sfn=sucFromName(label);
-
-  // Also detect "Fecha de contabilización" as date fallback
-  const cFechaContab = headers.find(h=>h.toLowerCase().includes("contabiliz"));
+  // ── Exact-match overrides — these columns must match precisely ────────────
+  c.ing  = dcExact(headers,["Ingreso TOT","INGRESO TOT"]) || c.ing;
+  c.cst  = dcExact(headers,["Costo TOT","COSTO TOT"])    || c.cst;
+  c.sec  = dcExact(headers,["Descrip. Gr.Clie.","Descrip.Gr.Clie.","DESCRIP. GR.CLIE."]) || c.sec;
+  c.rep  = dcExact(headers,["Representante de ventas","Representante De Ventas"]) || c.rep;
+  c.clinm= dcExact(headers,["Descripción Cliente","Descripcion Cliente"]) || c.clinm;
+  c.suc  = dcExact(headers,["Sucursal","SUCURSAL"]) || c.suc;
+  c.f2   = dcExact(headers,["Jerarquia de producto 2","Jerarquía de producto 2"]) || c.f2;
+  c.f1   = dcExact(headers,["Jerarquia de producto","Jerarquía de producto"]) || c.f1;
+  c.per  = dcExact(headers,["Período/Año","Periodo/Año","Período/año"]) || c.per;
+  c.fecha= dcExact(headers,["Fecha factura","Fecha Factura"]) || c.fecha;
+  // Fecha contab fallback for period detection
+  const cFechaContab = dcExact(headers,["Fecha de contabilización","Fecha de Contabilización"]) ||
+    headers.find(h=>h.toLowerCase().includes("contabiliz"));
 
   const recs=[];
   rows.forEach(r=>{
