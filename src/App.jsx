@@ -75,7 +75,7 @@ function parseAndAggregate(fileLabel,rows){
   const fnYear=fnM?parseInt(fnM[1]):null;
   const fnMonth=fnM?parseInt(fnM[2]):null;
   const sucursal=fileLabel.match(/K(\d+)/i)?.[0]?.toUpperCase()||"K??";
-  const byClient={},byFam={},bySec={},byRep={},byArt={};
+  const byClient={},byFam={},bySec={},byRep={},byArt={},byTx={};
   let totalIng=0,totalCst=0,totalVol=0,salesRows=0;
   rows.forEach(r=>{
     const ing=pNum(r[cols.ing]),cst=pNum(r[cols.cst]);
@@ -106,6 +106,15 @@ function parseAndAggregate(fileLabel,rows){
     bySec[sec].ing+=ing;bySec[sec].lineas++;bySec[sec].clis.add(cli);
     if(rep!=="0"){if(!byRep[rep])byRep[rep]={rep,ing:0,lineas:0,clis:new Set()};byRep[rep].ing+=ing;byRep[rep].lineas++;byRep[rep].clis.add(cli);}
     if(art!=="?"){if(!byArt[art])byArt[art]={art,f2,f1,ing:0,cst:0,mgn:0,vol:0};byArt[art].ing+=ing;byArt[art].cst+=cst;byArt[art].mgn+=mgn;byArt[art].vol+=vol;}
+
+    // Store compact transaction for RFM / frequency analysis
+    // Resolve date: prefer Fecha factura, fallback to contabilización
+    let txDate=null;
+    const fv=r[cols.fecha]||r[cols.fcont];
+    if(fv){const d=fv instanceof Date?fv:new Date(fv);if(!isNaN(d)&&d.getFullYear()>2000)txDate=d.toISOString().slice(0,10);}
+    if(!txDate)txDate=`${yr}-${String(mo).padStart(2,'0')}-15`; // fallback to mid-month
+    if(!byTx[cli])byTx[cli]=[];
+    byTx[cli].push({art,f1,f2,ing,vol,rep,sec,date:txDate,yr,mo});
   });
   if(salesRows===0)return null;
   const clients=Object.values(byClient).map(c=>({...c,meses:c.months.size,mgnP:c.ing?Math.round(c.mgn/c.ing*1000)/10:0,months:undefined})).sort((a,b)=>b.ing-a.ing);
@@ -118,6 +127,7 @@ function parseAndAggregate(fileLabel,rows){
     sector:Object.values(bySec).map(s=>({...s,clientes:s.clis.size,clis:undefined})).sort((a,b)=>b.ing-a.ing),
     reps:Object.values(byRep).map(r=>({...r,clientes:r.clis.size,clis:undefined})).sort((a,b)=>b.ing-a.ing),
     articles:Object.values(byArt).map(a=>({...a,mgnP:a.ing?Math.round(a.mgn/a.ing*1000)/10:0})).sort((a,b)=>b.ing-a.ing).slice(0,30),
+    txByClient:byTx, // compact transactions keyed by client id
     cols:Object.fromEntries(Object.entries(cols).map(([k,v])=>[k,v||null])),
     headers:headers.slice(0,25),
   };
@@ -171,7 +181,7 @@ const TT=({active,payload,label})=>{
   </div>);
 };
 
-const VIEWS=["RESUMEN","CLIENTES","PRODUCTOS","SECTORES","TENDENCIAS","EJECUTIVOS","TABLA DIN.","ANÁLISIS","FIREBASE"];
+const VIEWS=["RESUMEN","CLIENTES","RFM","PRODUCTOS","SECTORES","TENDENCIAS","EJECUTIVOS","TABLA DIN.","ANÁLISIS","FIREBASE"];
 
 // ═══════════════════════════════════════════════
 // MAIN APP
@@ -200,6 +210,8 @@ export default function App(){
   const [pCols,setPCols]=useState("fyl");
   const [pVal,setPVal]=useState("ing");
   const [pSort,setPSort]=useState("desc");
+  const [rfmFilter,setRfmFilter]=useState("ALL");
+  const [rfmSel,setRfmSel]=useState(null);
 
   useEffect(()=>{localStorage.setItem("cmn_c",JSON.stringify(cartera));},[cartera]);
   useEffect(()=>{localStorage.setItem("cmn_r",JSON.stringify(repNames));},[repNames]);
@@ -331,6 +343,77 @@ export default function App(){
     }));
     return Object.values(m).map(a=>({...a,mgnP:a.ing?a.mgn/a.ing*100:0})).sort((a,b)=>b.ing-a.ing).slice(0,25);
   },[filteredAggs]);
+
+  // ── RFM — Recency, Frequency, Monetary ────────────────────────────────────
+  const rfmData=useMemo(()=>{
+    // Merge all transactions from filtered aggs
+    const txMap={}; // cli -> [{art,f1,f2,ing,vol,rep,date,yr,mo}]
+    filteredAggs.forEach(agg=>{
+      if(!agg.txByClient)return;
+      Object.entries(agg.txByClient).forEach(([cli,txs])=>{
+        if(!txMap[cli])txMap[cli]=[];
+        txMap[cli].push(...txs);
+      });
+    });
+
+    // Find latest date across all data
+    let maxDate=new Date(0);
+    Object.values(txMap).forEach(txs=>txs.forEach(t=>{
+      const d=new Date(t.date);if(d>maxDate)maxDate=d;
+    }));
+    const today=maxDate.getTime()>0?maxDate:new Date();
+
+    // Build RFM per client
+    const clientRFM=[];
+    const clientById=Object.fromEntries(allClients.map(c=>[c.id,c]));
+
+    Object.entries(txMap).forEach(([cli,txs])=>{
+      const cinfo=clientById[cli];if(!cinfo)return;
+      const dates=txs.map(t=>new Date(t.date)).filter(d=>!isNaN(d)).sort((a,b)=>a-b);
+      if(!dates.length)return;
+      const lastDate=dates[dates.length-1];
+      const firstDate=dates[0];
+      const daysSince=Math.round((today-lastDate)/(1000*60*60*24));
+      const spanDays=Math.round((lastDate-firstDate)/(1000*60*60*24));
+      const uniqueDays=new Set(dates.map(d=>d.toISOString().slice(0,10))).size;
+      const avgDaysBetween=uniqueDays>1?Math.round(spanDays/(uniqueDays-1)):null;
+      const monthSet=new Set(txs.map(t=>`${t.yr}/${t.mo}`));
+
+      // Article frequency
+      const artFreq={};
+      txs.forEach(t=>{
+        if(!artFreq[t.art])artFreq[t.art]={art:t.art,f1:t.f1,f2:t.f2,count:0,ing:0,vol:0};
+        artFreq[t.art].count++;artFreq[t.art].ing+=t.ing;artFreq[t.art].vol+=t.vol;
+      });
+      const topArts=Object.values(artFreq).sort((a,b)=>b.count-a.count).slice(0,8);
+
+      // Mix: filtros vs repuestos vs servicios vs lubricantes
+      const mixByF1={};
+      txs.forEach(t=>{if(!mixByF1[t.f1])mixByF1[t.f1]=0;mixByF1[t.f1]+=t.ing;});
+
+      // RFM score
+      let rScore=daysSince<=30?5:daysSince<=60?4:daysSince<=90?3:daysSince<=180?2:1;
+      const mCount=monthSet.size;
+      let fScore=mCount>=12?5:mCount>=6?4:mCount>=3?3:mCount>=2?2:1;
+      const mVal=cinfo.ing;
+      let mScore=mVal>=100000?5:mVal>=50000?4:mVal>=20000?3:mVal>=5000?2:1;
+      const rfmTotal=rScore+fScore+mScore;
+      const rfmLabel=rfmTotal>=12?"CAMPEÓN":rfmTotal>=9?"LEAL":rfmTotal>=6?"POTENCIAL":rfmTotal>=4?"EN RIESGO":"PERDIDO";
+
+      clientRFM.push({
+        id:cli,nm:cinfo.nm,sector:cinfo.sector,rep:cinfo.rep,
+        ing:cinfo.ing,mgnP:cinfo.mgnP,seg:cinfo.seg,
+        daysSince,lastDate:lastDate.toISOString().slice(0,10),
+        firstDate:firstDate.toISOString().slice(0,10),
+        totalTx:txs.length,uniqueDays,avgDaysBetween,
+        monthsActive:monthSet.size,
+        rScore,fScore,mScore,rfmTotal,rfmLabel,
+        topArts,mixByF1,
+      });
+    });
+
+    return clientRFM.sort((a,b)=>a.daysSince-b.daysSince);
+  },[filteredAggs,allClients]);
 
   const fyList=[...new Set(filteredAggs.map(f=>f.fyl))].sort();
 
@@ -722,6 +805,31 @@ export default function App(){
             </Pnl>
           </div>
 
+          {/* Mix F1 chart for the rep */}
+          <Pnl><ST sub="Filtros vs Repuestos vs Servicios — qué vende más">Mix de ventas del ejecutivo</ST>
+            {(()=>{
+              const mixMap={};
+              filteredAggs.forEach(agg=>{
+                if(!agg.txByClient)return;
+                Object.values(agg.txByClient).flat().filter(t=>t.rep===selRep).forEach(t=>{
+                  if(!mixMap[t.f1])mixMap[t.f1]=0;mixMap[t.f1]+=t.ing;
+                });
+              });
+              const sorted=Object.entries(mixMap).sort((a,b)=>b[1]-a[1]);
+              const total=sorted.reduce((s,[,v])=>s+v,0);
+              return sorted.slice(0,7).map(([f1,ing],i)=>{
+                const pct=total?ing/total*100:0;
+                return(<div key={f1} style={{marginBottom:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:2}}>
+                    <span style={{color:B.white,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",flex:1}}>{f1}</span>
+                    <span style={{color:B.ch[i%B.ch.length],fontWeight:700,flexShrink:0,marginLeft:8}}>{f$(ing)} · {pct.toFixed(0)}%</span>
+                  </div>
+                  <div style={{height:6,background:B.border,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,background:B.ch[i%B.ch.length],borderRadius:3}}/></div>
+                </div>);
+              });
+            })()}
+          </Pnl>
+
           {/* Client table */}
           <Pnl style={{overflow:"auto"}}><ST sub={`${repProfile.clients.length} clientes en cartera — ordenados por ingreso`}>Cartera completa</ST>
             <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,tableLayout:"fixed"}}>
@@ -815,6 +923,159 @@ export default function App(){
     </div>
   </div>);};
 
+  // ── RFM VIEW ──────────────────────────────────────────────────────────────
+  const RFM_COLORS={"CAMPEÓN":B.greenLt,"LEAL":B.amberLt,"POTENCIAL":B.blueLt,"EN RIESGO":B.amber,"PERDIDO":B.red};
+  const SEMAFORO=(days)=>days<=30?"🟢":days<=90?"🟡":days<=180?"🟠":"🔴";
+
+  const ViewRFM=()=>{
+    const filtered_rfm=rfmData.filter(c=>{
+      if(rfmFilter!=="ALL"&&c.rfmLabel!==rfmFilter)return false;
+      if(search){const q=search.toLowerCase();return c.nm.toLowerCase().includes(q)||c.id.includes(q);}
+      return true;
+    });
+
+    // Summary counts
+    const counts=rfmData.reduce((m,c)=>{m[c.rfmLabel]=(m[c.rfmLabel]||0)+1;return m;},{});
+    const daysBuckets=[{label:"0-30 días",min:0,max:30,c:B.greenLt},{label:"31-90 días",min:31,max:90,c:B.amberLt},{label:"91-180 días",min:91,max:180,c:B.amber},{label:"+180 días",min:181,max:9999,c:B.red}];
+
+    return(<div style={{display:"flex",flexDirection:"column",gap:14}}>
+      {/* Summary cards */}
+      <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+        {Object.entries(RFM_COLORS).map(([label,color])=>(
+          <div key={label} onClick={()=>setRfmFilter(rfmFilter===label?"ALL":label)} style={{background:rfmFilter===label?`${color}22`:B.card,border:`1px solid ${rfmFilter===label?color:B.border}`,borderRadius:10,padding:"12px 16px",flex:"1 1 120px",cursor:"pointer",borderTop:`2px solid ${color}`}}>
+            <div style={{fontSize:9,color:B.g3,letterSpacing:".1em",textTransform:"uppercase",marginBottom:4}}>{label}</div>
+            <div style={{fontSize:22,fontWeight:900,color}}>{counts[label]||0}</div>
+            <div style={{fontSize:9,color:B.g3,marginTop:2}}>clientes</div>
+          </div>
+        ))}
+        <div style={{background:B.card,border:`1px solid ${B.border}`,borderRadius:10,padding:"12px 16px",flex:"1 1 120px",borderTop:`2px solid ${B.g3}`}}>
+          <div style={{fontSize:9,color:B.g3,letterSpacing:".1em",textTransform:"uppercase",marginBottom:4}}>SIN TX</div>
+          <div style={{fontSize:22,fontWeight:900,color:B.g3}}>{allClients.length-rfmData.length}</div>
+          <div style={{fontSize:9,color:B.g3,marginTop:2}}>sin transacciones detalladas</div>
+        </div>
+      </div>
+
+      {/* Days since last purchase distribution */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(320px,1fr))",gap:14}}>
+        <Pnl><ST sub="Días desde última compra por cliente">Semáforo de actividad</ST>
+          {daysBuckets.map(b=>{
+            const bc=rfmData.filter(c=>c.daysSince>=b.min&&c.daysSince<=b.max);
+            const pct=rfmData.length?bc.length/rfmData.length*100:0;
+            return(<div key={b.label} style={{marginBottom:10}}>
+              <div style={{display:"flex",justifyContent:"space-between",fontSize:11,marginBottom:3}}>
+                <span style={{color:b.c,fontWeight:700}}>{b.label}</span>
+                <span style={{color:B.white}}>{bc.length} clientes · {pct.toFixed(1)}%</span>
+              </div>
+              <div style={{height:8,background:B.border,borderRadius:4,overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,background:b.c,borderRadius:4,transition:"width .5s"}}/></div>
+              <div style={{display:"flex",gap:4,flexWrap:"wrap",marginTop:4}}>{bc.slice(0,4).map(c=>(<span key={c.id} style={{fontSize:9,color:B.g3,background:B.panel,borderRadius:3,padding:"1px 5px",border:`1px solid ${B.border}`}}>{c.nm.split(" ").slice(0,2).join(" ")} ({c.daysSince}d)</span>))}</div>
+            </div>);
+          })}
+        </Pnl>
+
+        <Pnl><ST sub="Distribución RFM — Recencia + Frecuencia + Valor">Mapa RFM</ST>
+          <ResponsiveContainer width="100%" height={220}><ScatterChart margin={{top:10,right:20,left:0,bottom:10}}>
+            <CartesianGrid strokeDasharray="3 3" stroke={B.border}/>
+            <XAxis type="number" dataKey="daysSince" name="Días sin comprar" stroke={B.g3} tick={{fontSize:9}} label={{value:"Días sin comprar",position:"insideBottom",offset:-2,fill:B.g3,fontSize:9}}/>
+            <YAxis type="number" dataKey="ing" name="Ingresos" stroke={B.g3} tick={{fontSize:9}} tickFormatter={f$} width={56}/>
+            <ZAxis type="number" dataKey="totalTx" range={[30,300]}/>
+            <Tooltip cursor={{strokeDasharray:"3 3"}} content={({active,payload})=>{
+              if(!active||!payload?.length)return null;const d=payload[0]?.payload;
+              return <div style={{background:B.panel,border:`1px solid ${B.border}`,borderRadius:8,padding:"9px 13px",fontSize:11}}>
+                <p style={{color:RFM_COLORS[d?.rfmLabel]||B.red,fontWeight:700,marginBottom:4}}>{d?.nm?.split(" ").slice(0,3).join(" ")} · {d?.rfmLabel}</p>
+                <p style={{color:B.white}}>Ingresos: {f$(d?.ing)}</p>
+                <p style={{color:B.g2}}>Última compra: {d?.daysSince}d atrás · {d?.totalTx} transacciones</p>
+              </div>;
+            }}/>
+            <Scatter data={rfmData} fill={B.red}>{rfmData.map((c,i)=><Cell key={i} fill={RFM_COLORS[c.rfmLabel]||B.g3}/>)}</Scatter>
+          </ScatterChart></ResponsiveContainer>
+        </Pnl>
+      </div>
+
+      {/* Main table */}
+      <div style={{display:"grid",gridTemplateColumns:rfmSel?"1fr 360px":"1fr",gap:14}}>
+        <Pnl style={{overflow:"auto"}}><ST sub={`${filtered_rfm.length} clientes · ordenados por actividad reciente`}>Tabla RFM completa</ST>
+          <div style={{display:"flex",gap:5,marginBottom:10,flexWrap:"wrap"}}>
+            {["ALL",...Object.keys(RFM_COLORS)].map(f=>(<Pill key={f} label={f==="ALL"?"Todos":f} active={rfmFilter===f} color={f==="ALL"?B.g3:RFM_COLORS[f]} onClick={()=>setRfmFilter(f)}/>))}
+          </div>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,tableLayout:"fixed"}}>
+            <colgroup><col style={{width:22}}/><col style={{width:"22%"}}/><col style={{width:50}}/><col style={{width:72}}/><col style={{width:56}}/><col style={{width:52}}/><col style={{width:58}}/><col style={{width:64}}/><col/></colgroup>
+            <thead><tr style={{borderBottom:`1px solid ${B.border}`}}>{["#","Cliente","🚦","Ingresos","Mgn%","Ult. compra","Tx totales","Frec. días","RFM"].map((h,i)=>(<th key={h} style={{padding:"5px 6px",textAlign:i===3?"right":"left",color:B.g3,fontSize:9,letterSpacing:".06em",textTransform:"uppercase"}}>{h}</th>))}</tr></thead>
+            <tbody>{filtered_rfm.map((c,i)=>(
+              <tr key={c.id} onClick={()=>setRfmSel(rfmSel?.id===c.id?null:c)} style={{cursor:"pointer",borderBottom:`1px solid ${B.border}22`,background:rfmSel?.id===c.id?`${B.red}10`:"transparent",borderLeft:rfmSel?.id===c.id?`2px solid ${B.red}`:"2px solid transparent"}}>
+                <td style={{padding:"6px 6px",color:B.g3,fontSize:9}}>{i+1}</td>
+                <td style={{padding:"6px 6px",overflow:"hidden"}}><div style={{fontWeight:700,color:B.white,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{c.nm}</div><div style={{fontSize:9,color:B.g3}}>{c.sector}</div></td>
+                <td style={{padding:"6px 6px",textAlign:"center",fontSize:14}}>{SEMAFORO(c.daysSince)}</td>
+                <td style={{padding:"6px 6px",fontWeight:700,color:B.red,textAlign:"right"}}>{f$(c.ing)}</td>
+                <td style={{padding:"6px 6px",textAlign:"center"}}><MBadge v={c.mgnP}/></td>
+                <td style={{padding:"6px 6px",color:c.daysSince>90?B.red:c.daysSince>30?B.amberLt:B.greenLt,fontSize:10,fontWeight:600}}>{c.daysSince}d</td>
+                <td style={{padding:"6px 6px",color:B.g3,textAlign:"center"}}>{c.totalTx}</td>
+                <td style={{padding:"6px 6px",color:B.g2,textAlign:"center"}}>{c.avgDaysBetween?`~${c.avgDaysBetween}d`:"—"}</td>
+                <td style={{padding:"6px 6px"}}><span style={{background:`${RFM_COLORS[c.rfmLabel]}22`,color:RFM_COLORS[c.rfmLabel],borderRadius:4,padding:"2px 6px",fontSize:9,fontWeight:700,whiteSpace:"nowrap"}}>{c.rfmLabel}</span></td>
+              </tr>
+            ))}</tbody>
+          </table>
+        </Pnl>
+
+        {/* Client detail panel */}
+        {rfmSel&&(<div style={{display:"flex",flexDirection:"column",gap:10}}>
+          <Pnl style={{borderTop:`2px solid ${RFM_COLORS[rfmSel.rfmLabel]||B.g3}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}>
+              <div><div style={{fontWeight:800,fontSize:13,color:B.white}}>{rfmSel.nm}</div><div style={{fontSize:10,color:B.g3,marginTop:2}}>{rfmSel.id} · {rfmSel.sector}</div></div>
+              <button onClick={()=>setRfmSel(null)} style={{background:"none",border:"none",color:B.g3,cursor:"pointer",fontSize:16,padding:2}}>✕</button>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:7}}>
+              {[
+                {l:"Última compra",v:`${rfmSel.daysSince} días`,c:rfmSel.daysSince>90?B.red:rfmSel.daysSince>30?B.amberLt:B.greenLt},
+                {l:"Clasificación",v:rfmSel.rfmLabel,c:RFM_COLORS[rfmSel.rfmLabel]},
+                {l:"Total transacciones",v:rfmSel.totalTx,c:B.white},
+                {l:"Frecuencia",v:rfmSel.avgDaysBetween?`cada ~${rfmSel.avgDaysBetween}d`:"1 compra",c:B.g2},
+                {l:"Meses activo",v:rfmSel.monthsActive,c:B.white},
+                {l:"Ingresos totales",v:f$(rfmSel.ing),c:B.red},
+              ].map(({l,v,c})=>(<div key={l} style={{background:B.panel,borderRadius:6,padding:"8px 10px",border:`1px solid ${B.border}`}}><div style={{fontSize:9,color:B.g3,marginBottom:2}}>{l}</div><div style={{fontSize:12,fontWeight:800,color:c||B.white}}>{v}</div></div>))}
+            </div>
+            <div style={{marginTop:10,padding:"7px 10px",background:`${RFM_COLORS[rfmSel.rfmLabel]}15`,border:`1px solid ${RFM_COLORS[rfmSel.rfmLabel]}44`,borderRadius:5,fontSize:10,color:RFM_COLORS[rfmSel.rfmLabel]}}>
+              {rfmSel.rfmLabel==="CAMPEÓN"&&"⭐ Cliente top — mantener relación y ofrecer productos nuevos"}
+              {rfmSel.rfmLabel==="LEAL"&&"💪 Cliente fiel — potenciar con cross-sell de familias relacionadas"}
+              {rfmSel.rfmLabel==="POTENCIAL"&&"🚀 Alto potencial — incrementar visitas y propuesta de valor"}
+              {rfmSel.rfmLabel==="EN RIESGO"&&"⚠️ En riesgo — contactar urgente, entender por qué bajó la frecuencia"}
+              {rfmSel.rfmLabel==="PERDIDO"&&"🔴 Cliente perdido — requiere recuperación activa con oferta especial"}
+            </div>
+          </Pnl>
+
+          {/* Mix F1 breakdown */}
+          <Pnl><ST sub="% de compras por línea de producto">Mix de compras</ST>
+            {Object.entries(rfmSel.mixByF1).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([f1,ing],i)=>{
+              const total=Object.values(rfmSel.mixByF1).reduce((s,v)=>s+v,0);
+              const pct=total?ing/total*100:0;
+              return(<div key={f1} style={{marginBottom:7}}>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:10,marginBottom:2}}>
+                  <span style={{color:B.white,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:180}}>{f1}</span>
+                  <span style={{color:B.red,fontWeight:700,flexShrink:0,marginLeft:6}}>{f$(ing)} · {pct.toFixed(0)}%</span>
+                </div>
+                <div style={{height:5,background:B.border,borderRadius:2,overflow:"hidden"}}><div style={{height:"100%",width:`${pct}%`,background:B.ch[i%B.ch.length],borderRadius:2}}/></div>
+              </div>);
+            })}
+          </Pnl>
+
+          {/* Top articles */}
+          <Pnl><ST sub="Artículos comprados con más frecuencia">Top artículos</ST>
+            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
+              <thead><tr style={{borderBottom:`1px solid ${B.border}`}}>
+                {["Código","Familia","Compras","Ingresos"].map(h=>(<th key={h} style={{padding:"4px 7px",textAlign:h==="Ingresos"?"right":"left",color:B.g3,fontSize:9,textTransform:"uppercase"}}>{h}</th>))}
+              </tr></thead>
+              <tbody>{rfmSel.topArts.map((a,i)=>(<tr key={a.art} style={{borderBottom:`1px solid ${B.border}22`}}>
+                <td style={{padding:"5px 7px",color:B.red,fontWeight:700,fontSize:10}}>{a.art}</td>
+                <td style={{padding:"5px 7px",color:B.g3,fontSize:9,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:100}}>{a.f2}</td>
+                <td style={{padding:"5px 7px",color:B.amberLt,fontWeight:700,textAlign:"center"}}>{a.count}×</td>
+                <td style={{padding:"5px 7px",color:B.white,fontWeight:600,textAlign:"right"}}>{f$(a.ing)}</td>
+              </tr>))}</tbody>
+            </table>
+          </Pnl>
+        </div>)}
+      </div>
+    </div>);
+  };
+
   const ViewFirebase=()=>(<div style={{display:"flex",flexDirection:"column",gap:14}}>
     <Pnl style={{borderLeft:`3px solid ${B.amber}`}}><ST>📋 Activar modo compartido con Firebase</ST><div style={{display:"flex",flexDirection:"column",gap:12}}>{[{n:1,t:"Crear proyecto",d:"console.firebase.google.com → Crear proyecto → cummins-zona-sur"},{n:2,t:"Activar Storage",d:"Menú → Storage → Comenzar → modo prueba"},{n:3,t:"Credenciales",d:"⚙️ → General → Tus apps → </> → Registrar → copiar firebaseConfig"},{n:4,t:"Pegar en código",d:"Edita src/App.jsx con tu config y redespliega"}].map(s=>(<div key={s.n} style={{display:"flex",gap:12}}><div style={{width:26,height:26,borderRadius:5,background:B.red,color:B.white,fontWeight:900,fontSize:12,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0}}>{s.n}</div><div><div style={{fontWeight:700,color:B.white,fontSize:12,marginBottom:2}}>{s.t}</div><div style={{fontSize:11,color:B.g2,lineHeight:1.5}}>{s.d}</div></div></div>))}</div></Pnl>
     <Pnl><ST sub="Archivos cargados">Datos en memoria</ST>{fileAggs.length===0?<div style={{color:B.g3,fontSize:11}}>Ningún archivo — usa + EXCELS</div>:(
@@ -830,6 +1091,7 @@ export default function App(){
     switch(view){
       case "RESUMEN":    return <ViewResumen/>;
       case "CLIENTES":   return <ViewClientes/>;
+      case "RFM":        return <ViewRFM/>;
       case "PRODUCTOS":  return <ViewProductos/>;
       case "SECTORES":   return <ViewSectores/>;
       case "TENDENCIAS": return <ViewTendencias/>;
