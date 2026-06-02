@@ -1,3 +1,4 @@
+
 import { useState, useMemo, useCallback, useEffect } from "react";
 import * as XLSX from "xlsx";
 import { AreaChart,Area,BarChart,Bar,LineChart,Line,XAxis,YAxis,
@@ -972,34 +973,50 @@ export default function App(){
           })}
         </Pnl>
 
-        <Pnl><ST sub="Distribución RFM — Recencia + Frecuencia + Valor">Mapa RFM</ST>
-          <ResponsiveContainer width="100%" height={220}><ScatterChart margin={{top:10,right:20,left:0,bottom:10}}>
-            <CartesianGrid strokeDasharray="3 3" stroke={B.border}/>
-            <XAxis type="number" dataKey="daysSince" name="Días sin comprar" stroke={B.g3} tick={{fontSize:9}} label={{value:"Días sin comprar",position:"insideBottom",offset:-2,fill:B.g3,fontSize:9}}/>
-            <YAxis type="number" dataKey="ing" name="Ingresos" stroke={B.g3} tick={{fontSize:9}} tickFormatter={f$} width={56}/>
-            <ZAxis type="number" dataKey="totalTx" range={[30,300]}/>
-            <Tooltip cursor={{strokeDasharray:"3 3"}} content={({active,payload})=>{
-              if(!active||!payload?.length)return null;const d=payload[0]?.payload;
-              return <div style={{background:B.panel,border:`1px solid ${B.border}`,borderRadius:8,padding:"9px 13px",fontSize:11}}>
-                <p style={{color:RFM_COLORS[d?.rfmLabel]||B.red,fontWeight:700,marginBottom:4}}>{d?.nm?.split(" ").slice(0,3).join(" ")} · {d?.rfmLabel}</p>
-                <p style={{color:B.white}}>Ingresos: {f$(d?.ing)}</p>
-                <p style={{color:B.g2}}>Última compra: {d?.daysSince}d atrás · {d?.totalTx} transacciones</p>
-              </div>;
-            }}/>
-            <Scatter data={rfmData} fill={B.red}>{rfmData.map((c,i)=><Cell key={i} fill={RFM_COLORS[c.rfmLabel]||B.g3}/>)}</Scatter>
-          </ScatterChart></ResponsiveContainer>
+        <Pnl><ST sub="Artículos que más clientes compran — ordenados por número de pedidos">Rotación de artículos</ST>
+          {(()=>{
+            // Build article rotation from txByClient across filtered aggs
+            const artMap={};
+            filteredAggs.forEach(agg=>{
+              if(!agg.txByClient)return;
+              Object.values(agg.txByClient).flat().forEach(t=>{
+                if(!t.art||t.art==="?")return;
+                if(!artMap[t.art])artMap[t.art]={art:t.art,f2:t.f2,pedidos:0,clis:new Set(),meses:new Set(),ing:0};
+                artMap[t.art].pedidos++;artMap[t.art].clis.add(t.f2+t.art);// unique
+                artMap[t.art].meses.add(`${t.yr}/${t.mo}`);artMap[t.art].ing+=t.ing;
+              });
+              // count unique clients per article
+              Object.entries(agg.txByClient).forEach(([cli,txs])=>{
+                txs.forEach(t=>{if(t.art&&t.art!=="?"&&artMap[t.art])artMap[t.art].clis.add(cli);});
+              });
+            });
+            const sorted=Object.values(artMap).sort((a,b)=>b.pedidos-a.pedidos).slice(0,10);
+            const maxP=sorted[0]?.pedidos||1;
+            return sorted.map((a,i)=>(
+              <div key={a.art} style={{marginBottom:9,display:"flex",gap:10,alignItems:"center"}}>
+                <div style={{fontSize:10,color:B.red,fontWeight:700,minWidth:110,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{a.art}</div>
+                <div style={{flex:1}}>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:9,marginBottom:2}}>
+                    <span style={{color:B.g3,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:120}}>{a.f2}</span>
+                    <span style={{color:B.white,flexShrink:0,marginLeft:4}}><strong style={{color:B.amberLt}}>{a.pedidos}</strong> pedidos · {a.clis.size} clientes · {a.meses.size} meses</span>
+                  </div>
+                  <div style={{height:6,background:B.border,borderRadius:3,overflow:"hidden"}}><div style={{height:"100%",width:`${a.pedidos/maxP*100}%`,background:B.ch[i%B.ch.length],borderRadius:3}}/></div>
+                </div>
+              </div>
+            ));
+          })()}
         </Pnl>
       </div>
 
       {/* Main table */}
       <div style={{display:"grid",gridTemplateColumns:rfmSel?"1fr 360px":"1fr",gap:14}}>
-        <Pnl style={{overflow:"auto"}}><ST sub={`${filtered_rfm.length} clientes · ordenados por actividad reciente`}>Tabla RFM completa</ST>
+        <Pnl style={{overflow:"auto"}}><ST sub={`${filtered_rfm.length} clientes · click para ver qué compra y con qué frecuencia`}>Tabla de actividad de clientes</ST>
           <div style={{display:"flex",gap:5,marginBottom:10,flexWrap:"wrap"}}>
             {["ALL",...Object.keys(RFM_COLORS)].map(f=>(<Pill key={f} label={f==="ALL"?"Todos":f} active={rfmFilter===f} color={f==="ALL"?B.g3:RFM_COLORS[f]} onClick={()=>setRfmFilter(f)}/>))}
           </div>
           <table style={{width:"100%",borderCollapse:"collapse",fontSize:11,tableLayout:"fixed"}}>
             <colgroup><col style={{width:22}}/><col style={{width:"22%"}}/><col style={{width:50}}/><col style={{width:72}}/><col style={{width:56}}/><col style={{width:52}}/><col style={{width:58}}/><col style={{width:64}}/><col/></colgroup>
-            <thead><tr style={{borderBottom:`1px solid ${B.border}`}}>{["#","Cliente","🚦","Ingresos","Mgn%","Ult. compra","Tx totales","Frec. días","RFM"].map((h,i)=>(<th key={h} style={{padding:"5px 6px",textAlign:i===3?"right":"left",color:B.g3,fontSize:9,letterSpacing:".06em",textTransform:"uppercase"}}>{h}</th>))}</tr></thead>
+            <thead><tr style={{borderBottom:`1px solid ${B.border}`}}>{["#","Cliente","","Ingresos","Mgn%","Ult. compra","Nº pedidos","Cada cuánto","Clasificación"].map((h,i)=>(<th key={h} style={{padding:"5px 6px",textAlign:i===3?"right":"left",color:B.g3,fontSize:9,letterSpacing:".06em",textTransform:"uppercase"}}>{h}</th>))}</tr></thead>
             <tbody>{filtered_rfm.map((c,i)=>(
               <tr key={c.id} onClick={()=>setRfmSel(rfmSel?.id===c.id?null:c)} style={{cursor:"pointer",borderBottom:`1px solid ${B.border}22`,background:rfmSel?.id===c.id?`${B.red}10`:"transparent",borderLeft:rfmSel?.id===c.id?`2px solid ${B.red}`:"2px solid transparent"}}>
                 <td style={{padding:"6px 6px",color:B.g3,fontSize:9}}>{i+1}</td>
@@ -1008,7 +1025,7 @@ export default function App(){
                 <td style={{padding:"6px 6px",fontWeight:700,color:B.red,textAlign:"right"}}>{f$(c.ing)}</td>
                 <td style={{padding:"6px 6px",textAlign:"center"}}><MBadge v={c.mgnP}/></td>
                 <td style={{padding:"6px 6px",color:c.daysSince>90?B.red:c.daysSince>30?B.amberLt:B.greenLt,fontSize:10,fontWeight:600}}>{c.daysSince}d</td>
-                <td style={{padding:"6px 6px",color:B.g3,textAlign:"center"}}>{c.totalTx}</td>
+                <td style={{padding:"6px 6px",color:B.amberLt,fontWeight:700,textAlign:"center"}}>{c.totalTx}</td>
                 <td style={{padding:"6px 6px",color:B.g2,textAlign:"center"}}>{c.avgDaysBetween?`~${c.avgDaysBetween}d`:"—"}</td>
                 <td style={{padding:"6px 6px"}}><span style={{background:`${RFM_COLORS[c.rfmLabel]}22`,color:RFM_COLORS[c.rfmLabel],borderRadius:4,padding:"2px 6px",fontSize:9,fontWeight:700,whiteSpace:"nowrap"}}>{c.rfmLabel}</span></td>
               </tr>
@@ -1057,19 +1074,48 @@ export default function App(){
             })}
           </Pnl>
 
-          {/* Top articles */}
-          <Pnl><ST sub="Artículos comprados con más frecuencia">Top artículos</ST>
-            <table style={{width:"100%",borderCollapse:"collapse",fontSize:11}}>
-              <thead><tr style={{borderBottom:`1px solid ${B.border}`}}>
-                {["Código","Familia","Compras","Ingresos"].map(h=>(<th key={h} style={{padding:"4px 7px",textAlign:h==="Ingresos"?"right":"left",color:B.g3,fontSize:9,textTransform:"uppercase"}}>{h}</th>))}
-              </tr></thead>
-              <tbody>{rfmSel.topArts.map((a,i)=>(<tr key={a.art} style={{borderBottom:`1px solid ${B.border}22`}}>
-                <td style={{padding:"5px 7px",color:B.red,fontWeight:700,fontSize:10}}>{a.art}</td>
-                <td style={{padding:"5px 7px",color:B.g3,fontSize:9,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",maxWidth:100}}>{a.f2}</td>
-                <td style={{padding:"5px 7px",color:B.amberLt,fontWeight:700,textAlign:"center"}}>{a.count}×</td>
-                <td style={{padding:"5px 7px",color:B.white,fontWeight:600,textAlign:"right"}}>{f$(a.ing)}</td>
-              </tr>))}</tbody>
-            </table>
+          {/* Top articles with monthly frequency */}
+          <Pnl><ST sub="Cuántas veces compra cada artículo y en qué meses">Artículos y frecuencia de compra</ST>
+            {rfmSel.topArts.map((a,i)=>{
+              // Get monthly breakdown for this client+article
+              const monthlyData=FM.map((m,mi)=>{
+                const count=filteredAggs.reduce((s,agg)=>{
+                  if(agg.fmi!==mi)return s;
+                  const txs=(agg.txByClient||{})[rfmSel.id]||[];
+                  return s+txs.filter(t=>t.art===a.art).length;
+                },0);
+                return{mes:m,count};
+              });
+              const activeMeses=monthlyData.filter(m=>m.count>0);
+              const maxCount=Math.max(...monthlyData.map(m=>m.count),1);
+              return(
+                <div key={a.art} style={{marginBottom:14,paddingBottom:12,borderBottom:`1px solid ${B.border}`}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:6}}>
+                    <div>
+                      <div style={{color:B.red,fontWeight:700,fontSize:12}}>{a.art}</div>
+                      <div style={{color:B.g3,fontSize:9,marginTop:1}}>{a.f2} · {f$(a.ing)} total · {a.count} pedidos</div>
+                    </div>
+                    <div style={{textAlign:"right",flexShrink:0}}>
+                      <div style={{color:B.amberLt,fontWeight:800,fontSize:14}}>{a.count}×</div>
+                      <div style={{color:B.g3,fontSize:9}}>en {activeMeses.length} mes{activeMeses.length!==1?"es":""}</div>
+                    </div>
+                  </div>
+                  {/* Mini bar chart by month */}
+                  <div style={{display:"flex",gap:3,alignItems:"flex-end",height:28}}>
+                    {monthlyData.map((m,mi)=>(
+                      <div key={mi} style={{flex:1,display:"flex",flexDirection:"column",alignItems:"center",gap:2}}>
+                        <div style={{width:"100%",height:`${m.count?m.count/maxCount*20+4:2}px`,background:m.count?B.ch[i%B.ch.length]:B.border,borderRadius:2,minHeight:2,transition:"height .3s"}}/>
+                        <div style={{fontSize:7,color:m.count?B.g2:B.border,lineHeight:1}}>{m.count?m.count:""}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{display:"flex",gap:1,marginTop:2}}>
+                    {FM.map((m,mi)=>(<div key={mi} style={{flex:1,fontSize:7,color:B.g4,textAlign:"center"}}>{m.slice(0,1)}</div>))}
+                  </div>
+                </div>
+              );
+            })}
+            {rfmSel.topArts.length===0&&<div style={{color:B.g3,fontSize:11}}>Sin datos de artículos para este cliente</div>}
           </Pnl>
         </div>)}
       </div>
